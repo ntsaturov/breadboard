@@ -1,0 +1,29 @@
+# 👉 Стандартные папки Jekyll
+_site/
+.sass-cache/
+.jekyll-cache/
+.jekyll-metadata
+
+# 👉 Логи и временные файлы
+*.log
+*.tmp
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# 👉 Ruby & Bundler
+vendor/
+.bundle/
+Gemfile.lock
+
+# 👉 VS Code / IDE
+.vscode/
+.idea/
+
+# 👉 MacOS системные файлы
+.DS_Store
+
+# 👉 Node/npm (если используешь дополнительные сборки)
+node_modules/
+package-lock.json
