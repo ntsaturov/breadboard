@@ -13,7 +13,6 @@ _site/
 Thumbs.db
 
 # 👉 Ruby & Bundler
-vendor/
 .bundle/
 Gemfile.lock
 
