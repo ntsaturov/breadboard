@@ -26,3 +26,6 @@ Gemfile.lock
 # 👉 Node/npm (если используешь дополнительные сборки)
 node_modules/
 package-lock.json
+
+# 👉 Секреты (токен Telegram-бота)
+.env
