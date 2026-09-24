@@ -9,10 +9,15 @@
     TELEGRAM_CHANNEL_ID  @username канала или числовой id (-100...)
     SITE_URL             адрес сайта, по умолчанию берётся из CNAME
     WAIT_FOR_PAGE        сколько секунд ждать, пока страница появится на сайте (0 — не ждать)
+    TELEGRAM_PREVIEW_ID  твой личный chat id — куда слать превью
     DRY_RUN=1            только напечатать сообщение, ничего не отправлять
+    PREVIEW=1            отправить превью себе в личку вместо канала
     YES=1                не спрашивать подтверждение перед отправкой
 
-В front matter поста можно указать `telegram: false`, чтобы не отправлять его.
+В front matter поста можно указать `telegram: false`, чтобы не отправлять его,
+и `telegram_read_time: false`, чтобы не показывать время чтения.
+`telegram_emoji` — эмодзи перед заголовком (по умолчанию 📝, пустая строка — без эмодзи).
+`telegram_image` — обложка поста (иначе берётся header.teaser / header.image).
 """
 
 import html
@@ -28,6 +33,7 @@ from pathlib import Path
 import yaml
 
 MESSAGE_LIMIT = 4096
+DEFAULT_EMOJI = "📝"
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -54,6 +60,13 @@ def read_post(path):
     if not match:
         return {}, text
     return yaml.safe_load(match.group(1)) or {}, match.group(2)
+
+
+def cover_url(meta, base):
+    """Обложка: telegram_image, иначе картинка из header (как в Minimal Mistakes)."""
+    header = meta.get("header") or {}
+    image = meta.get("telegram_image") or header.get("teaser") or header.get("image")
+    return absolute(image, base) if image else None
 
 
 def post_url(path, meta, base):
@@ -173,31 +186,30 @@ def to_telegram_html(markdown, base):
 
 
 def build_message(path, meta, body, base):
+    """Возвращает (текст сообщения, кнопка со ссылкой на пост)."""
     url = post_url(path, meta, base)
-    title = f"<b>{html.escape(str(meta.get('title', '')))}</b>"
 
-    tags = meta.get("tags") or []
-    if isinstance(tags, str):
-        tags = tags.split()
-    hashtags = " ".join("#" + re.sub(r"\W+", "_", str(t)) for t in tags)
-
-    footer_full = f'🔗 <a href="{url}">Читать в блоге</a>'
-    footer_cut = f'…\n\n🔗 <a href="{url}">Читать полностью в блоге</a>'
-    tail = f"\n\n{hashtags}" if hashtags else ""
+    emoji = meta.get("telegram_emoji", DEFAULT_EMOJI)
+    title = html.escape(str(meta.get("title", "")))
+    header = f"{emoji} <b>{title}</b>" if emoji else f"<b>{title}</b>"
+    if meta.get("telegram_read_time", True):
+        # Как на сайте: words_per_minute из _config.yml
+        minutes = max(1, round(len(re.findall(r"\w+", body)) / 200))
+        header += f"\n<i>⏱ {minutes} мин чтения</i>"
 
     blocks = to_telegram_html(body, base)
-    full = "\n\n".join([title, *blocks, footer_full]) + tail
+    full = "\n\n".join([header, *blocks])
     if len(full) <= MESSAGE_LIMIT:
-        return full
+        return full, {"text": "📖 Читать в блоге", "url": url}
 
     # Не влезает — берём столько абзацев, сколько поместится, и ведём в блог.
-    kept = [title]
-    budget = MESSAGE_LIMIT - len(footer_cut) - len(tail) - 2
+    kept = [header]
+    budget = MESSAGE_LIMIT - 3
     for block in blocks:
         if len("\n\n".join(kept + [block])) > budget:
             break
         kept.append(block)
-    return "\n\n".join(kept) + "\n\n" + footer_cut + tail
+    return "\n\n".join(kept) + " …", {"text": "📖 Читать полностью в блоге", "url": url}
 
 
 # --- Telegram / сеть -------------------------------------------------------
@@ -217,13 +229,18 @@ def wait_for_page(url, timeout):
         time.sleep(20)
 
 
-def send(text):
+def send(chat_id, text, button, image=None):
     token = os.environ["TELEGRAM_BOT_TOKEN"]
+    # Обложку показываем как большое превью ссылки над текстом: в отличие от
+    # sendPhoto, у такого сообщения нет лимита подписи в 1024 символа.
+    preview = ({"url": image, "prefer_large_media": True, "show_above_text": True}
+               if image else {"is_disabled": True})
     payload = {
-        "chat_id": os.environ["TELEGRAM_CHANNEL_ID"],
+        "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
-        "link_preview_options": {"is_disabled": True},
+        "link_preview_options": preview,
+        "reply_markup": {"inline_keyboard": [[button]]},
     }
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage",
@@ -243,11 +260,14 @@ def main(paths):
     load_env()
     base = site_url()
     dry_run = os.environ.get("DRY_RUN") == "1"
-    confirm = os.environ.get("YES") != "1"
-    wait = int(os.environ.get("WAIT_FOR_PAGE", "0"))
+    preview = os.environ.get("PREVIEW") == "1"
+    confirm = os.environ.get("YES") != "1" and not preview
+    wait = 0 if preview else int(os.environ.get("WAIT_FOR_PAGE", "0"))
+    chat_var = "TELEGRAM_PREVIEW_ID" if preview else "TELEGRAM_CHANNEL_ID"
+    chat_id = os.environ.get(chat_var)
 
-    if not dry_run and not (os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHANNEL_ID")):
-        sys.exit("Заполни TELEGRAM_BOT_TOKEN и TELEGRAM_CHANNEL_ID в .env")
+    if not dry_run and not (os.environ.get("TELEGRAM_BOT_TOKEN") and chat_id):
+        sys.exit(f"Заполни TELEGRAM_BOT_TOKEN и {chat_var} в .env")
 
     for path in paths:
         meta, body = read_post(path)
@@ -255,18 +275,21 @@ def main(paths):
             print(f"Пропускаю {path}: отключено во front matter")
             continue
 
-        text = build_message(path, meta, body, base)
-        print(f"----- {path} ({len(text)} символов)\n{text}\n")
+        text, button = build_message(path, meta, body, base)
+        image = cover_url(meta, base)
+        print(f"----- {path} ({len(text)} символов)\n"
+              f"{f'[обложка: {image}]' + chr(10) if image else ''}"
+              f"{text}\n[{button['text']}] → {button['url']}\n")
         if dry_run:
             continue
-        if confirm and input(f"Отправить в {os.environ['TELEGRAM_CHANNEL_ID']}? [y/N] ").strip().lower() not in ("y", "д"):
+        if confirm and input(f"Отправить в {chat_id}? [y/N] ").strip().lower() not in ("y", "д"):
             print("Не отправлено")
             continue
 
         if wait:
-            wait_for_page(post_url(path, meta, base), wait)
-        send(text)
-        print(f"Отправлено: {path}")
+            wait_for_page(button["url"], wait)
+        send(chat_id, text, button, image)
+        print(f"Отправлено в {chat_id}: {path}")
 
 
 if __name__ == "__main__":
