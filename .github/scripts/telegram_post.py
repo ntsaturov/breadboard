@@ -125,6 +125,7 @@ def inline(text, base):
 def to_telegram_html(markdown, base):
     """Возвращает список блоков (абзацев) в формате Telegram HTML."""
     markdown = re.sub(r"\{%.*?%\}|\{\{.*?\}\}", "", markdown, flags=re.S)  # Liquid
+    markdown = re.sub(r"\{:[^}\n]*\}", "", markdown)  # атрибуты kramdown, например {: width="300"}
     lines = markdown.splitlines()
     blocks, paragraph = [], []
     i = 0
