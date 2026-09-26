@@ -14,10 +14,13 @@
     PREVIEW=1            отправить превью себе в личку вместо канала
     YES=1                не спрашивать подтверждение перед отправкой
 
-В front matter поста можно указать `telegram: false`, чтобы не отправлять его,
-и `telegram_read_time: false`, чтобы не показывать время чтения.
+В front matter поста можно указать `telegram: false`, чтобы не отправлять его.
 `telegram_emoji` — эмодзи перед заголовком (по умолчанию 📝, пустая строка — без эмодзи).
 `telegram_image` — обложка поста (иначе берётся header.teaser / header.image).
+Картинки из текста статьи уходят альбомом перед постом (тогда обложка не нужна);
+`telegram_album: false` — оставить их в тексте ссылками.
+`telegram_text` — свой текст для канала вместо статьи (Markdown); альбома тогда нет,
+картинка — telegram_image, кнопка — «Читать полностью в блоге».
 """
 
 import html
@@ -28,12 +31,15 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 import yaml
 
 MESSAGE_LIMIT = 4096
+CAPTION_LIMIT = 1024
 DEFAULT_EMOJI = "📝"
+IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)[^)]*\)(\{:[^}\n]*\})?")
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -186,18 +192,15 @@ def to_telegram_html(markdown, base):
     return [b for b in blocks if b.strip()]
 
 
-def build_message(path, meta, body, base):
+def build_message(path, meta, body, base, teaser=False):
     """Возвращает (текст сообщения, кнопка со ссылкой на пост)."""
     url = post_url(path, meta, base)
+    if teaser:
+        blocks = to_telegram_html(meta["telegram_text"], base)
+        header = build_header(meta)
+        return "\n\n".join([header, *blocks]), {"text": "📖 Читать полностью в блоге", "url": url}
 
-    emoji = meta.get("telegram_emoji", DEFAULT_EMOJI)
-    title = html.escape(str(meta.get("title", "")))
-    header = f"{emoji} <b>{title}</b>" if emoji else f"<b>{title}</b>"
-    if meta.get("telegram_read_time", True):
-        # Как на сайте: words_per_minute из _config.yml
-        minutes = max(1, round(len(re.findall(r"\w+", body)) / 200))
-        header += f"\n<i>⏱ {minutes} мин чтения</i>"
-
+    header = build_header(meta)
     blocks = to_telegram_html(body, base)
     full = "\n\n".join([header, *blocks])
     if len(full) <= MESSAGE_LIMIT:
@@ -211,6 +214,13 @@ def build_message(path, meta, body, base):
             break
         kept.append(block)
     return "\n\n".join(kept) + " …", {"text": "📖 Читать полностью в блоге", "url": url}
+
+
+def build_header(meta):
+
+    emoji = meta.get("telegram_emoji", DEFAULT_EMOJI)
+    title = html.escape(str(meta.get("title", "")))
+    return f"{emoji} <b>{title}</b>" if emoji else f"<b>{title}</b>"
 
 
 # --- Telegram / сеть -------------------------------------------------------
@@ -230,29 +240,77 @@ def wait_for_page(url, timeout):
         time.sleep(20)
 
 
-def send(chat_id, text, button, image=None):
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    # Обложку показываем как большое превью ссылки над текстом: в отличие от
-    # sendPhoto, у такого сообщения нет лимита подписи в 1024 символа.
+def api(method, payload, files=None):
+    """Вызов Bot API: JSON, а если есть файлы — multipart/form-data."""
+    url = f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{method}"
+    if files:
+        boundary = uuid.uuid4().hex
+        parts = []
+        for key, value in payload.items():
+            value = value if isinstance(value, str) else json.dumps(value)
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n'
+                         f"{value}\r\n".encode())
+        for key, path in files.items():
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"; '
+                         f'filename="{path.name}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode()
+                         + path.read_bytes() + b"\r\n")
+        data = b"".join(parts) + f"--{boundary}--\r\n".encode()
+        headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    else:
+        data = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, data=data, headers=headers),
+                                    timeout=120) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as err:
+        sys.exit(f"Telegram ответил ошибкой: {err.read().decode()}")
+
+
+def send_album(chat_id, images, base):
+    """Картинки из статьи альбомом (до 10 штук в альбоме). Локальные файлы
+    загружаются с диска, поэтому альбом работает и до публикации сайта."""
+    for start in range(0, len(images), 10):
+        media, files = [], {}
+        for i, (alt, src) in enumerate(images[start:start + 10]):
+            local = ROOT / src.lstrip("/")
+            if src.startswith("/") and local.exists():
+                files[f"photo{i}"] = local
+                media.append({"type": "photo", "media": f"attach://photo{i}"})
+            else:
+                media.append({"type": "photo", "media": absolute(src, base)})
+        if len(media) == 1:
+            if files:
+                api("sendPhoto", {"chat_id": chat_id}, {"photo": files["photo0"]})
+            else:
+                api("sendPhoto", {"chat_id": chat_id, "photo": media[0]["media"]})
+        else:
+            api("sendMediaGroup", {"chat_id": chat_id, "media": media}, files)
+
+
+def send(chat_id, text, button, image=None, base=""):
+    markup = {"inline_keyboard": [[button]]}
+    if image and len(text) <= CAPTION_LIMIT:
+        # Короткий пост — одно сообщение: фото с подписью (файл берём с диска, если он есть).
+        local = ROOT / image.removeprefix(base).lstrip("/")
+        payload = {"chat_id": chat_id, "caption": text, "parse_mode": "HTML", "reply_markup": markup}
+        if local.is_file():
+            api("sendPhoto", payload, {"photo": local})
+        else:
+            api("sendPhoto", {**payload, "photo": image})
+        return
+
+    # Длинный пост — обложка как большое превью ссылки над текстом: у такого
+    # сообщения нет лимита подписи в 1024 символа.
     preview = ({"url": image, "prefer_large_media": True, "show_above_text": True}
                if image else {"is_disabled": True})
-    payload = {
+    api("sendMessage", {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
         "link_preview_options": preview,
-        "reply_markup": {"inline_keyboard": [[button]]},
-    }
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            json.load(resp)
-    except urllib.error.HTTPError as err:
-        sys.exit(f"Telegram ответил ошибкой: {err.read().decode()}")
+        "reply_markup": markup,
+    })
 
 
 def main(paths):
@@ -276,9 +334,15 @@ def main(paths):
             print(f"Пропускаю {path}: отключено во front matter")
             continue
 
-        text, button = build_message(path, meta, body, base)
-        image = cover_url(meta, base)
+        # Картинки статьи уходят альбомом перед текстом, а из текста убираются.
+        teaser = bool(meta.get("telegram_text"))
+        album = IMAGE_RE.findall(body) if meta.get("telegram_album", not teaser) else []
+        album = [(alt, src) for alt, src, _ in album]
+        body = IMAGE_RE.sub("", body) if album else body
+        text, button = build_message(path, meta, body, base, teaser)
+        image = None if album else cover_url(meta, base)
         print(f"----- {path} ({len(text)} символов)\n"
+              f"{f'[альбом: {len(album)} фото]' + chr(10) if album else ''}"
               f"{f'[обложка: {image}]' + chr(10) if image else ''}"
               f"{text}\n[{button['text']}] → {button['url']}\n")
         if dry_run:
@@ -289,7 +353,9 @@ def main(paths):
 
         if wait:
             wait_for_page(button["url"], wait)
-        send(chat_id, text, button, image)
+        if album:
+            send_album(chat_id, album, base)
+        send(chat_id, text, button, image, base)
         print(f"Отправлено в {chat_id}: {path}")
 
 
