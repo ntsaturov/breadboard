@@ -41,3 +41,7 @@ WAIT_FOR_PAGE=900 python3 .github/scripts/telegram_post.py _posts/info/2026-09-2
 - Можно передать несколько постов сразу.
 - `telegram: false` во front matter поста — скрипт его не отправит.
 - Длинные посты (больше 4096 символов) обрезаются по абзацам со ссылкой «Читать полностью в блоге».
+
+Пример:
+
+PREVIEW=1 python3 .github/scripts/telegram_post.py _posts/info/2026-09-29-prepare.md | grep '→'; curl -s -o /dev/null -w "%{http_code}\n" https://breadboard.tech/pet-project/prepare/
