@@ -293,7 +293,7 @@ def send(chat_id, text, button, image=None, base=""):
     if image and len(text) <= CAPTION_LIMIT:
         # Короткий пост — одно сообщение: фото с подписью (файл берём с диска, если он есть).
         local = ROOT / image.removeprefix(base).lstrip("/")
-        payload = {"chat_id": chat_id, "caption": text, "parse_mode": "HTML", "reply_markup": markup}
+        payload = {"chat_id": chat_id, "caption": text, "parse_mode": "HTML"}
         if local.is_file():
             api("sendPhoto", payload, {"photo": local})
         else:
@@ -309,7 +309,7 @@ def send(chat_id, text, button, image=None, base=""):
         "text": text,
         "parse_mode": "HTML",
         "link_preview_options": preview,
-        # "reply_markup": markup,
+        "reply_markup": markup,
     })
 
 
