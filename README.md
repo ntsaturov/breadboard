@@ -44,4 +44,4 @@ WAIT_FOR_PAGE=900 python3 .github/scripts/telegram_post.py _posts/info/2026-09-2
 
 Пример:
 
-PREVIEW=1 python3 .github/scripts/telegram_post.py _posts/info/2026-09-29-prepare.md | grep '→'; curl -s -o /dev/null -w "%{http_code}\n" https://breadboard.tech/pet-project/prepare/
+PREVIEW=1 python3 .github/scripts/telegram_post.py _posts/info/2026-10-11-components.md | grep '→'; curl -s -o /dev/null -w "%{http_code}\n" https://breadboard.tech/pet-project/prepare/
