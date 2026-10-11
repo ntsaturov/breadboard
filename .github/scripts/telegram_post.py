@@ -309,7 +309,7 @@ def send(chat_id, text, button, image=None, base=""):
         "text": text,
         "parse_mode": "HTML",
         "link_preview_options": preview,
-        "reply_markup": markup,
+        # "reply_markup": markup,
     })
 
 
